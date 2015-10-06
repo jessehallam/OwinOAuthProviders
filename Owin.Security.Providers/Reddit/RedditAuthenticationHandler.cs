@@ -1,10 +1,13 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Security.Claims;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using System.Web.UI;
 using Microsoft.Owin;
 using Microsoft.Owin.Infrastructure;
 using Microsoft.Owin.Logging;
@@ -21,6 +24,8 @@ namespace Owin.Security.Providers.Reddit
         private const string XmlSchemaString = "http://www.w3.org/2001/XMLSchema#string";
         private const string TokenEndpoint = "https://ssl.reddit.com/api/v1/access_token";
         private const string UserInfoEndpoint = "https://oauth.reddit.com/api/v1/me";
+        private const string MySubredditsEndpoint = "https://oauth.reddit.com/subreddits/mine/moderator";
+        private static readonly Regex SubRedditRegex = new Regex(@"^/r/(.*?)/");
 
         private readonly ILogger logger;
         private readonly HttpClient httpClient;
@@ -100,6 +105,10 @@ namespace Owin.Security.Providers.Reddit
                 text = await graphResponse.Content.ReadAsStringAsync();
                 JObject user = JObject.Parse(text);
 
+                // JHallam OCT-6-2015
+                // Get the subreddits the user is a moderator of
+                IList<string> moderatedSubs = await GetSubRedditsAsModerator(accessToken);
+
                 var context = new RedditAuthenticatedContext(Context, user, accessToken, expires, refreshToken);
                 context.Identity = new ClaimsIdentity(
                     Options.AuthenticationType,
@@ -122,6 +131,12 @@ namespace Owin.Security.Providers.Reddit
                     context.Identity.AddClaim(new Claim("urn:reddit:accesstoken", context.AccessToken, XmlSchemaString, Options.AuthenticationType));
                 }
                 context.Identity.AddClaim(new Claim("urn:reddit:overeighteen", context.OverEighteen.ToString()));
+                //context.Identity.AddClaim(new Claim("urn:reddit:moderator_of", string.Join(";", moderatedSubs)));
+
+                context.Identity.AddClaims(from sub in moderatedSubs
+                                           select new Claim("urn:reddit:moderator_of", sub, XmlSchemaString));
+
+
                 context.Properties = properties;
 
                 await Options.Provider.Authenticated(context);
@@ -241,6 +256,65 @@ namespace Owin.Security.Providers.Reddit
                 return context.IsRequestCompleted;
             }
             return false;
+        }
+
+        private class RedditListing<T>
+        {
+            public T Content { get; set; }
+            public string Before { get; set; }
+            public string After { get; set; }
+        }
+
+        protected async Task<IList<string>> GetSubRedditsAsModerator(string accessToken)
+        {
+            var result = new List<string>();
+            var subs = await GetModeratedSubs(accessToken);
+
+            if (subs.Content != null && subs.Content.Any())
+                result.AddRange(subs.Content);
+
+            while (!string.IsNullOrEmpty(subs.After))
+            {
+                subs = await GetModeratedSubs(accessToken, subs.After);
+                if (subs.Content != null && subs.Content.Any())
+                    result.AddRange(subs.Content);
+            }
+
+            return result;
+        }
+
+        private async Task<RedditListing<IEnumerable<string>>> GetModeratedSubs(string accessToken, string after = null)
+        {
+            var requestMessage = new HttpRequestMessage(HttpMethod.Get,
+                string.IsNullOrEmpty(after) ? MySubredditsEndpoint : MySubredditsEndpoint + "?after=" + after);
+            requestMessage.Headers.Add("User-Agent", Options.UserAgent);
+            requestMessage.Headers.Add("Authorization", "bearer " + Uri.EscapeDataString(accessToken));
+
+            var responseMessage = await httpClient.SendAsync(requestMessage, Request.CallCancelled);
+            var content = await responseMessage.Content.ReadAsStringAsync();
+
+            var result = new RedditListing<IEnumerable<string>>();
+            var body = JObject.Parse(content);
+            var data = body["data"];
+
+            result.After = (string) body["after"];
+            result.Before = (string) body["before"];
+            if (data["children"] != null)
+            {
+                var children = (JArray) data["children"];
+                if (children != null && children.Count > 0)
+                {
+                    var items = from child in children
+                        where (string) child["kind"] == "t5"
+                        select (string) child["data"]["url"];
+
+                    result.Content = (from i in items
+                        let m = SubRedditRegex.Match(i)
+                        select m.Groups[1].Value.ToLowerInvariant()).ToList();
+                }
+            }
+
+            return result;
         }
     }
 }
