@@ -197,7 +197,7 @@ namespace Owin.Security.Providers.Reddit
                     "&redirect_uri=" + Uri.EscapeDataString(redirectUri) +
                     "&scope=" + Uri.EscapeDataString(scope) +
                     "&state=" + Uri.EscapeDataString(state) +
-                    "&duration=permanent";
+                    "&duration=temporary";
 
                 Response.Redirect(authorizationEndpoint);
             }
